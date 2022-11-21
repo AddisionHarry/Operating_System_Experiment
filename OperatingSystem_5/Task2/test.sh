@@ -1,5 +1,5 @@
 #!/bin/bash
 for ((i = 1; $i <= 100; i++)); do
-    echo 100
-    ./fork
+    echo $i
+    ./threadCreate.o 100
 done

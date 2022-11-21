@@ -2,6 +2,7 @@
     "files.associations": {
         "*.m": "matlab",
         "unistd.h": "c",
-        "stdio.h": "c"
+        "stdio.h": "c",
+        "sched.h": "c"
     }
 }

@@ -1,7 +1,0 @@
-{
-    "files.associations": {
-        "*.m": "matlab",
-        "stdio.h": "c",
-        "typeinfo": "c"
-    }
-}

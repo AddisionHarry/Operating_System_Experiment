@@ -3,6 +3,13 @@
         "*.m": "matlab",
         "unistd.h": "c",
         "stdio.h": "c",
-        "sched.h": "c"
+        "sched.h": "c",
+        "semaphore.h": "c",
+        "array": "c",
+        "hash_map": "c",
+        "string_view": "c",
+        "initializer_list": "c",
+        "utility": "c",
+        "stdbool.h": "c"
     }
 }

@@ -15,14 +15,16 @@
 
 // #define USING_FILE_OPERATION
 
+#define KEY_SHARED_MEMORY 120
 #define BUFFER_NUM_MAX 10
-#define WRITE_NUM_MAX 9999
+#define WRITE_NUM_MAX 6
 
 typedef struct
 {
     bool GetMaxNumber; // The flag that represent the consumer has consume all the numbers.
     void *bufferPos;   // The buffer used among threads.
     sem_t *Mutex;      // The sem lock used for lock among threads.
+    sem_t *full;       // the sem represent that the buffer is full.
 } SharedData_t;        // The data shared among the threads.
 
 /**
@@ -110,83 +112,107 @@ static int Read_Number_FromBuff(void *buffer, int pos, int *Number)
 #endif
 }
 
-void *Producer_Entry(void *param)
+void *Producer_Entry(SharedData_t *sharedMemory)
 {
-    SharedData_t *ShareData = (SharedData_t *)param;
-    if (!ShareData)
-        return NULL;
     int writePos = 0, WriteNumber = 0;
     while (WriteNumber <= WRITE_NUM_MAX)
     {
         /* Inquire the authority to write&read. */
-        sem_wait(ShareData->Mutex);
+        sem_wait(sharedMemory->Mutex);
         /* Get the authority to write&read, then write&read data. */
         // First judge whether the buffer is full now.
-        if (Read_Number_FromBuff(ShareData->bufferPos, BUFFER_NUM_MAX - 1, &writePos) != BUFFER_NUM_MAX - 1)
+        if (Read_Number_FromBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, &writePos) != BUFFER_NUM_MAX - 1)
         {
             // Write the corresponding number to the right position.
-            Write_Number_IntoBuff(ShareData->bufferPos, writePos, WriteNumber);
+            Write_Number_IntoBuff(sharedMemory->bufferPos, writePos, WriteNumber);
             // Update the new valid position.
-            Write_Number_IntoBuff(ShareData->bufferPos, BUFFER_NUM_MAX - 1, writePos + 1);
+            Write_Number_IntoBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, writePos + 1);
             // Increase the number to write.
             WriteNumber++;
         }
         else
         {
             // Now the buffer is full, thus nothing to operate but not write the number.
-            Write_Number_IntoBuff(ShareData->bufferPos, BUFFER_NUM_MAX - 1, writePos);
+            Write_Number_IntoBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, writePos);
         }
         /* Return the authority to write. */
-        sem_post(ShareData->Mutex);
+        sem_post(sharedMemory->Mutex);
     }
+    for (int i = 0; i < BUFFER_NUM_MAX; ++i)
+        printf("%d : %d\n", i, ((int *)sharedMemory->bufferPos)[i]);
     printf("\n\n\n\n Producer End! \n\n\n\n\n");
     return NULL;
 }
 
-void *Consumer_Entry(void *param)
+void *Consumer_Entry(void)
 {
-    SharedData_t *ShareData = (SharedData_t *)param;
-    if (!ShareData)
-        return NULL;
-    int WritePos = 0, ReadData = 0;
-    while ((!ShareData->GetMaxNumber) || (WritePos > 0))
+    /* Create shared memory. */
+    int shmid = shmget((key_t)KEY_SHARED_MEMORY, sizeof(SharedData_t), 0666 | IPC_CREAT);
+    if (shmid == -1)
+    {
+        fprintf(stderr, "shmget failed\n");
+        exit(EXIT_FAILURE);
+    }
+    void *shm = shmat(shmid, (void *)0, 0);
+    if (shm == (void *)-1)
+    {
+        fprintf(stderr, "shmat failed\n");
+        exit(EXIT_FAILURE);
+    }
+    SharedData_t *sharedMemory = (SharedData_t *)shm;
+
+    int WritePos = 1, ReadData = 0;
+    struct timespec timeout = {
+        .tv_nsec = 0,
+        .tv_sec = 1,
+    };
+
+    while ((!sharedMemory->GetMaxNumber) || (WritePos > 0))
     {
         /* Inquire the authority to write&read. */
-        sem_wait(ShareData->Mutex);
+        for (int i = 0; i < BUFFER_NUM_MAX; ++i)
+            printf("%d : %d\n", i, ((int *)sharedMemory->bufferPos)[i]);
+        sleep(1);
+        sem_wait(sharedMemory->Mutex);
         /* Get the authority to write&read, then write&read data. */
         // First judge whether the buffer is empty now.
-        if (Read_Number_FromBuff(ShareData->bufferPos, BUFFER_NUM_MAX - 1, &WritePos) > 0)
+        if (Read_Number_FromBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, &WritePos) > 0)
         {
             /* Read the corresponding data from the buff. */
-            Read_Number_FromBuff(ShareData->bufferPos, WritePos - 1, &ReadData);
-            Write_Number_IntoBuff(ShareData->bufferPos, BUFFER_NUM_MAX - 1, WritePos - 1);
+            Read_Number_FromBuff(sharedMemory->bufferPos, WritePos - 1, &ReadData);
+            Write_Number_IntoBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, WritePos - 1);
 
             /* Judge whether the end comes. */
             if (ReadData == WRITE_NUM_MAX)
-                ShareData->GetMaxNumber = true;
+                sharedMemory->GetMaxNumber = true;
 
             /* Return the authority to read. */
-            sem_post(ShareData->Mutex);
+            sem_post(sharedMemory->Mutex);
 
             /* Print the relative info. */
-            printf("%6d\t\t%4d\n", getpid(), ReadData);
+            printf("%6d\t\t%4d\t%d\t%d\n", getpid(), ReadData, WritePos, sharedMemory->GetMaxNumber);
         }
         else
         {
             /* Write the pos back. */
-            Write_Number_IntoBuff(ShareData->bufferPos, BUFFER_NUM_MAX - 1, WritePos);
+            Write_Number_IntoBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, WritePos);
             /* Return the authority to read. */
-            sem_post(ShareData->Mutex);
+            sem_post(sharedMemory->Mutex);
         }
     }
-    printf("\n\n\n\n Consumer End! \n\n\n\n\n");
+    /* Detach the shared memory. */
+    if (shmdt(shm) == -1)
+    {
+        fprintf(stderr, "shmdt failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("\n\n\n\n Consumer PID: %d End! \n\n\n\n\n", getpid());
     return NULL;
 }
 
 int main(void)
 {
     /* Create the buffer by creating a file. */
-    // Get the current location.
     FILE *filepointer = NULL; // The file pointer used for buffer.
     // Create the file.
     filepointer = fopen("buffer.txt", "rwx"); // The text file which could be written and read.
@@ -202,13 +228,11 @@ int main(void)
     // printf("Read Number: %d\n", Read_Number_FromBuff(filepointer, 4, NULL));
     fclose(filepointer);
 #ifndef USING_FILE_OPERATION
-    // Create shared memeory as buffer.
-    int segment_id = shmget(IPC_PRIVATE, BUFFER_NUM_MAX * sizeof(int), S_IRUSR | S_IWUSR);
-    int *shared_memory = (int *)shmat(segment_id, NULL, 0);
+    int *buffer = (int *)malloc(BUFFER_NUM_MAX * sizeof(int));
 #endif
 
     /* Create the lock semaphore for the task. */
-    sem_t *mutex;
+    sem_t *mutex, *full;
 MUTEX_TRYAGAIN:
     mutex = (sem_t *)sem_open("mutex", O_CREAT, 0064, 1);
     if (!mutex)
@@ -218,15 +242,38 @@ MUTEX_TRYAGAIN:
         goto MUTEX_TRYAGAIN;
         exit(-1);
     }
+FULL_TRYAGAIN:
+    full = (sem_t *)sem_open("full", O_CREAT, 0064, 1);
+    if (!full)
+    {
+        printf("full sem error\n");
+        sem_unlink("full");
+        goto FULL_TRYAGAIN;
+        exit(-1);
+    }
 
     /* Prepare for the shared data among threads. */
-    SharedData_t SharedData;
-    SharedData.Mutex = mutex;
-    SharedData.GetMaxNumber = false;
+    /* Create shared memory. */
+    int shmid = shmget((key_t)KEY_SHARED_MEMORY, sizeof(SharedData_t), 0666 | IPC_CREAT);
+    if (shmid == -1)
+    {
+        fprintf(stderr, "shmget failed\n");
+        exit(EXIT_FAILURE);
+    }
+    void *shm = shmat(shmid, (void *)0, 0);
+    if (shm == (void *)-1)
+    {
+        fprintf(stderr, "shmat failed\n");
+        exit(EXIT_FAILURE);
+    }
+    SharedData_t *sharedMemory = (SharedData_t *)shm;
+    sharedMemory->Mutex = mutex;
+    sharedMemory->full = full;
+    sharedMemory->GetMaxNumber = false;
 #ifndef USING_FILE_OPERATION
-    SharedData.bufferPos = (void *)shared_memory;
+    sharedMemory->bufferPos = (void *)buffer;
 #else
-    SharedData.bufferPos = (void *)filepointer;
+    sharedMemory.bufferPos = (void *)filepointer;
 #endif
 
     /* Prepare the print message. */
@@ -244,7 +291,10 @@ MUTEX_TRYAGAIN:
     { // Child process.
         fork();
         fork();
-        Consumer_Entry(&SharedData); // Here comes four consumer processes.
+        Consumer_Entry(); // Here comes four consumer processes.
+        printf("1 End\n\n\n\n");
+        while (wait(NULL) > 0)
+            continue;
         exit(0);
     }
     else
@@ -257,24 +307,28 @@ MUTEX_TRYAGAIN:
         }
         else if (pid)
             // Father process.
-            Producer_Entry(&SharedData); // Here comes the producer process.
+            Producer_Entry(sharedMemory); // Here comes the producer process.
         else if (!pid)
         {
             // Child process.
-            Consumer_Entry(&SharedData); // Here comes the fifth consumer process.
+            Consumer_Entry(); // Here comes the fifth consumer process.
+            printf("0 End\n\n\n\n");
             exit(0);
         }
     }
 
     /* Father process wait for all the child process to end. */
     while (wait(NULL) > 0)
-        sleep(1);
+        printf("waiting!\n");
+    /* Detach the shared memory. */
+    if (shmdt(shm) == -1)
+    {
+        fprintf(stderr, "shmdt failed\n");
+        exit(EXIT_FAILURE);
+    }
     /* Delete the semaphore. */
     sem_unlink("mutex");
-#ifndef USING_FILE_OPERATION
-    shmdt(shared_memory);
-    shmctl(segment_id, IPC_RMID, NULL);
-#endif
+    sem_unlink("full");
 
     return 0;
 }

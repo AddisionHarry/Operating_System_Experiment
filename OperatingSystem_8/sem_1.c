@@ -1,334 +1,429 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
-#include <semaphore.h>
+#include <errno.h>
+#include <sys/sem.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <assert.h>
-#include <math.h>
-#include <stdbool.h>
-#include <sys/shm.h>
 #include <sys/wait.h>
 
-// Remember to use 'gcc -o sem sem_1.c -pthread -lm' when compiling.
-
-// #define USING_FILE_OPERATION
-
-#define KEY_SHARED_MEMORY 120
-#define BUFFER_NUM_MAX 10
-#define WRITE_NUM_MAX 6
-
-typedef struct
+typedef enum
 {
-    bool GetMaxNumber; // The flag that represent the consumer has consume all the numbers.
-    void *bufferPos;   // The buffer used among threads.
-    sem_t *Mutex;      // The sem lock used for lock among threads.
-    sem_t *full;       // the sem represent that the buffer is full.
-} SharedData_t;        // The data shared among the threads.
+    FileLock = 0,  // The semaphore is used for file lock,
+    Producing_End, // The semaphore that indicate all the number has been produced.
+    WritingPos,    // The semaphore that indicate on which pos is empty.
+
+    Sem_All // The number of the semaphore used.
+} Sem_Purpose_Enum;
+
+#define BUFFER_FILE_NAME "buffer.txt" // The name of the buffer file.
+#define BUFFER_MAX_NUMBERS 10         // The most numbers buffer could hold.
+#define BUFFER_MAX_NUMBER 99999       // The max number buffer could hold.
+#define FTOK_PROJ_ID 16               // The proj_id used in ftok().
+#define SEM_SET_NUMBER (int)Sem_All   // The number of semaphores in the sem set.
 
 /**
- * @brief Write a number to the specific pos in the file.
+ * @brief Get the file-lock Sem ID
  * @author fwlh
- * @param  buffer           the buffer to be operated.
- * @param  pos              which pos to be written.
- * @param  Number           the number to write.
+ * @param  argv             The file path.
+ * @return int              The sem id get.
  */
-static void Write_Number_IntoBuff(void *buffer, int pos, int Number)
+int Get_SemID(char *argv)
 {
-#ifdef USING_FILE_OPERATION
-    /* Check the input params. */
-    assert(pos < BUFFER_NUM_MAX);
-    assert(pos >= 0);
-    assert(Number >= 0);
-    assert(Number <= WRITE_NUM_MAX);
-    assert(file);
-    /* Write the number into the file. */
-    printf("fseek return :%d\n", fseek(file, 5 * pos, SEEK_SET));
-    fprintf(file, "%4d", Number);
-#else
-    int *bufferMemory = (int *)buffer;
-    bufferMemory[pos] = Number;
-#endif
-}
-
-/**
- * @brief Write the inited bank into the buffer.
- * @author fwlh
- * @param  buffer           the buffer to be operated.
- * @param  pos              which pos to be written.
- */
-static void Write_Blank_IntoBuff(void *buffer, int pos)
-{
-#ifdef USING_FILE_OPERATION
-    /* Check the input params. */
-    assert(pos < BUFFER_NUM_MAX);
-    assert(pos >= 0);
-    assert(file);
-    /* Write the number into the file. */
-    fseek(file, 5 * pos, SEEK_SET);
-    for (int i = 0; i < 4; ++i)
-        fputc(' ', file);
-    fputc(',', file);
-#else
-    int *bufferMemory = (int *)buffer;
-    bufferMemory[pos] = -1;
-#endif
+    // Get the semaphore key.
+    int key = ftok(argv, FTOK_PROJ_ID);
+    if (key == -1)
+    {
+        fprintf(stderr, "Error in ftok:%s!\n", strerror(errno));
+        exit(1);
+    }
+    // Create semaphore.
+    int semid = semget(key, SEM_SET_NUMBER, IPC_CREAT | 0666);
+    if (semid == -1)
+    {
+        fprintf(stderr, "Error in semget:%s\n", strerror(errno));
+        exit(1);
+    }
+    return semid;
 }
 
 /**
- * @brief Read a number from the specific pos in the file.
+ * @brief Set the value of the single semaphore.
  * @author fwlh
- * @param  buffer           the buffer to be operated.
- * @param  pos              which pos to read.
- * @param  Number           the number read back from.
- * @return int              the number read back from.
+ * @param  semid            The id of the semaphore set.
+ * @param  index            The index of the semaphore to set value.
+ * @param  value            The value to set.
  */
-static int Read_Number_FromBuff(void *buffer, int pos, int *Number)
+void Set_Single_Semaphore_Value(int semid, int index, int value)
 {
-#ifdef USING_FILE_OPERATION
-    /* Check the input params. */
-    assert(pos < BUFFER_NUM_MAX);
-    assert(pos >= 0);
-    assert(file);
-
-    /* Read the specific number. */
-    int numberRead = 0;
-    fseek(file, 5 * pos, SEEK_SET);
-    fscanf(file, "%4d", &numberRead);
-
-    /* Clear the number on the corresponding pos and return. */
-    Write_Blank_IntoBuff(file, pos);
-    if (Number)
-        *Number = numberRead;
-    return numberRead;
-#else
-    int *bufferMemory = (int *)buffer;
-    int numberRead = bufferMemory[pos];
-    if (Number)
-        *Number = numberRead;
-    Write_Blank_IntoBuff(buffer, pos);
-    return numberRead;
-#endif
+    // Invalid input index.
+    if ((index < 0) || (index >= SEM_SET_NUMBER))
+        return;
+    if (semctl(semid, index, SETVAL, &value) == -1)
+        fprintf(stderr, "Error in semget:%s\n", strerror(errno));
 }
 
-void *Producer_Entry(SharedData_t *sharedMemory)
+/**
+ * @brief Set the value of all the semaphore.
+ * @author fwlh
+ * @param  semid            The id of the semaphore set.
+ * @param  value            The value to set, the param should be an array
+ *                              if SEM_SET_NUMBER does not equal 1
+ *                              and the array size should be SEM_SET_NUMBER
+ */
+void Set_All_Semaphore_Value(int semid, unsigned short *value)
 {
-    int writePos = 0, WriteNumber = 0;
-    while (WriteNumber <= WRITE_NUM_MAX)
+    if (!value)
+        printf("Set a null pointer!\n");
+    union semun
     {
-        /* Inquire the authority to write&read. */
-        sem_wait(sharedMemory->Mutex);
-        /* Get the authority to write&read, then write&read data. */
-        // First judge whether the buffer is full now.
-        if (Read_Number_FromBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, &writePos) != BUFFER_NUM_MAX - 1)
-        {
-            // Write the corresponding number to the right position.
-            Write_Number_IntoBuff(sharedMemory->bufferPos, writePos, WriteNumber);
-            // Update the new valid position.
-            Write_Number_IntoBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, writePos + 1);
-            // Increase the number to write.
-            WriteNumber++;
-        }
-        else
-        {
-            // Now the buffer is full, thus nothing to operate but not write the number.
-            Write_Number_IntoBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, writePos);
-        }
-        /* Return the authority to write. */
-        sem_post(sharedMemory->Mutex);
-    }
-    for (int i = 0; i < BUFFER_NUM_MAX; ++i)
-        printf("%d : %d\n", i, ((int *)sharedMemory->bufferPos)[i]);
-    printf("\n\n\n\n Producer End! \n\n\n\n\n");
-    return NULL;
-}
-
-void *Consumer_Entry(void)
-{
-    /* Create shared memory. */
-    int shmid = shmget((key_t)KEY_SHARED_MEMORY, sizeof(SharedData_t), 0666 | IPC_CREAT);
-    if (shmid == -1)
+        int val;
+        struct semid_ds *buf;
+        unsigned short *arry;
+        struct seminfo *__buf;
+    } arg;
+    if (SEM_SET_NUMBER == 1)
     {
-        fprintf(stderr, "shmget failed\n");
-        exit(EXIT_FAILURE);
-    }
-    void *shm = shmat(shmid, (void *)0, 0);
-    if (shm == (void *)-1)
-    {
-        fprintf(stderr, "shmat failed\n");
-        exit(EXIT_FAILURE);
-    }
-    SharedData_t *sharedMemory = (SharedData_t *)shm;
-
-    int WritePos = 1, ReadData = 0;
-    struct timespec timeout = {
-        .tv_nsec = 0,
-        .tv_sec = 1,
-    };
-
-    while ((!sharedMemory->GetMaxNumber) || (WritePos > 0))
-    {
-        /* Inquire the authority to write&read. */
-        for (int i = 0; i < BUFFER_NUM_MAX; ++i)
-            printf("%d : %d\n", i, ((int *)sharedMemory->bufferPos)[i]);
-        sleep(1);
-        sem_wait(sharedMemory->Mutex);
-        /* Get the authority to write&read, then write&read data. */
-        // First judge whether the buffer is empty now.
-        if (Read_Number_FromBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, &WritePos) > 0)
-        {
-            /* Read the corresponding data from the buff. */
-            Read_Number_FromBuff(sharedMemory->bufferPos, WritePos - 1, &ReadData);
-            Write_Number_IntoBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, WritePos - 1);
-
-            /* Judge whether the end comes. */
-            if (ReadData == WRITE_NUM_MAX)
-                sharedMemory->GetMaxNumber = true;
-
-            /* Return the authority to read. */
-            sem_post(sharedMemory->Mutex);
-
-            /* Print the relative info. */
-            printf("%6d\t\t%4d\t%d\t%d\n", getpid(), ReadData, WritePos, sharedMemory->GetMaxNumber);
-        }
-        else
-        {
-            /* Write the pos back. */
-            Write_Number_IntoBuff(sharedMemory->bufferPos, BUFFER_NUM_MAX - 1, WritePos);
-            /* Return the authority to read. */
-            sem_post(sharedMemory->Mutex);
-        }
-    }
-    /* Detach the shared memory. */
-    if (shmdt(shm) == -1)
-    {
-        fprintf(stderr, "shmdt failed\n");
-        exit(EXIT_FAILURE);
-    }
-    printf("\n\n\n\n Consumer PID: %d End! \n\n\n\n\n", getpid());
-    return NULL;
-}
-
-int main(void)
-{
-    /* Create the buffer by creating a file. */
-    FILE *filepointer = NULL; // The file pointer used for buffer.
-    // Create the file.
-    filepointer = fopen("buffer.txt", "rwx"); // The text file which could be written and read.
-    if (!filepointer)
-    {
-        printf("filepointer error\n");
-        exit(-1);
-    }
-    // Write numbers to the file.
-    for (int i = 0; i < BUFFER_NUM_MAX; ++i)
-        Write_Blank_IntoBuff(filepointer, i);
-    Write_Number_IntoBuff(filepointer, BUFFER_NUM_MAX - 1, 0);
-    // printf("Read Number: %d\n", Read_Number_FromBuff(filepointer, 4, NULL));
-    fclose(filepointer);
-#ifndef USING_FILE_OPERATION
-    int *buffer = (int *)malloc(BUFFER_NUM_MAX * sizeof(int));
-#endif
-
-    /* Create the lock semaphore for the task. */
-    sem_t *mutex, *full;
-MUTEX_TRYAGAIN:
-    mutex = (sem_t *)sem_open("mutex", O_CREAT, 0064, 1);
-    if (!mutex)
-    {
-        printf("mutex sem error\n");
-        sem_unlink("mutex");
-        goto MUTEX_TRYAGAIN;
-        exit(-1);
-    }
-FULL_TRYAGAIN:
-    full = (sem_t *)sem_open("full", O_CREAT, 0064, 1);
-    if (!full)
-    {
-        printf("full sem error\n");
-        sem_unlink("full");
-        goto FULL_TRYAGAIN;
-        exit(-1);
-    }
-
-    /* Prepare for the shared data among threads. */
-    /* Create shared memory. */
-    int shmid = shmget((key_t)KEY_SHARED_MEMORY, sizeof(SharedData_t), 0666 | IPC_CREAT);
-    if (shmid == -1)
-    {
-        fprintf(stderr, "shmget failed\n");
-        exit(EXIT_FAILURE);
-    }
-    void *shm = shmat(shmid, (void *)0, 0);
-    if (shm == (void *)-1)
-    {
-        fprintf(stderr, "shmat failed\n");
-        exit(EXIT_FAILURE);
-    }
-    SharedData_t *sharedMemory = (SharedData_t *)shm;
-    sharedMemory->Mutex = mutex;
-    sharedMemory->full = full;
-    sharedMemory->GetMaxNumber = false;
-#ifndef USING_FILE_OPERATION
-    sharedMemory->bufferPos = (void *)buffer;
-#else
-    sharedMemory.bufferPos = (void *)filepointer;
-#endif
-
-    /* Prepare the print message. */
-    printf("PID\t\tData\n------\t\t----\n");
-
-    /* Create five processes and record the PIDs. */
-    pid_t pid;
-    pid = fork();
-    if (pid < 0)
-    {
-        fprintf(stderr, "Fork Failed");
-        exit(-1);
-    }
-    else if (pid == 0)
-    { // Child process.
-        fork();
-        fork();
-        Consumer_Entry(); // Here comes four consumer processes.
-        printf("1 End\n\n\n\n");
-        while (wait(NULL) > 0)
-            continue;
-        exit(0);
+        arg.val = (int)*value;
+        if (semctl(semid, 0, SETVAL, arg) == -1)
+            fprintf(stderr, "Error in semget:%s\n", strerror(errno));
     }
     else
-    { // Father process.
-        pid = fork();
+    {
+        arg.arry = value;
+        if (semctl(semid, 0, SETALL, arg) == -1)
+            fprintf(stderr, "Error in semget:%s\n", strerror(errno));
+    }
+}
+
+/**
+ * @brief Release the specific semaphore in the sem set.
+ * @author fwlh
+ * @param  semid            The sem set id
+ * @param  index            The index of the specific sem.
+ * @return int              Whether the operation is performed successfully.
+ */
+int Semaphore_Release(int semid, int index)
+{
+    struct sembuf sops[SEM_SET_NUMBER];
+    sops[index].sem_num = index;
+    sops[index].sem_op = +1;
+    sops[index].sem_flg = SEM_UNDO;
+    return semop(semid, sops, SEM_SET_NUMBER);
+}
+
+/**
+ * @brief Take the specific semaphore in the sem set.
+ * @author fwlh
+ * @param  semid            The sem set id
+ * @param  index            The index of the specific sem.
+ * @return int              Whether the operation is performed successfully.
+ */
+int Semaphore_Take(int semid, int index)
+{
+    struct sembuf sops[SEM_SET_NUMBER];
+    sops[index].sem_num = index;
+    sops[index].sem_op = -1;
+    sops[index].sem_flg = SEM_UNDO;
+    return semop(semid, sops, SEM_SET_NUMBER);
+}
+
+/**
+ * @brief Convert a string into a int number.
+ * @author fwlh
+ * @param  string           The string to convert.
+ * @param  len              The length of the string
+ * @return int              The final integer number.
+ */
+static int String2IntNum_CVT(char *string, int len)
+{
+    int Number = 0;
+    for (int i = 0; i < len; ++i)
+    {
+        if (string[i] == ' ')
+            break;
+        else if ((string[i] <= '9') && (string[i] >= '0'))
+        {
+            Number *= 10;
+            Number += string[i] - '0';
+        }
+    }
+    return Number;
+}
+/**
+ * @brief Read a number from the buffer.
+ * @author fwlh
+ * @param  index            The real pos need to read.
+ * @return int              The number read from the buffer.
+ */
+int Read_Number_From_Buffer(int index)
+{
+    // The index is not valid.
+    if ((index < 0) || (index >= BUFFER_MAX_NUMBERS))
+        return -1;
+    // Read the number.
+    int fd = open(BUFFER_FILE_NAME, O_RDWR);
+    const char blank[6] = "     ";
+    char buf[6];
+    lseek(fd, 6 * index, SEEK_SET);
+    if (read(fd, buf, 5) < 0)
+        fprintf(stderr, "Error in semget:%s\n", strerror(errno));
+    buf[5] = 0;
+    lseek(fd, 6 * index, SEEK_SET);
+    write(fd, blank, 5);
+    close(fd);
+    // Convert the string into number.
+    return String2IntNum_CVT(buf, 5);
+}
+
+/**
+ * @brief Write a number to the specific position of the buffer.
+ * @author fwlh
+ * @param  Number           The number to be written, the number should be in
+ *                             range [0, BUFFER_MAX_NUMBER]
+ * @param  index            The pos to write into, could set range
+ *                             [0, BUFFER_MAX_NUMBERS - 1]
+ */
+void Write_Number_Into_Buffer(int Number, int index)
+{
+    // The index is not valid.
+    if ((index < 0) || (index >= BUFFER_MAX_NUMBERS))
+        return;
+    // The number is too large.
+    else if ((Number < 0) || (Number > BUFFER_MAX_NUMBER))
+        return;
+    int fd = open(BUFFER_FILE_NAME, O_RDWR);
+    char buf[6];
+    char const blank[6] = "     ";
+    sprintf(buf, "%5d", Number);
+    lseek(fd, 6 * index, SEEK_SET);
+    write(fd, buf, 5);
+    close(fd);
+}
+
+typedef enum
+{
+    Read_From_Buffer = 0,
+    Write_Into_Buffer
+} Buffer_Operation_Enum;
+
+/**
+ * @brief  Get the read/write pointer of the buffer.
+ * @author fwlh
+ * @param  semid            The necessary semaphore set id.
+ * @param  operation        The operation to inquire.
+ * @return int              The read/write pointer.
+ */
+static int Get_ReadWrite_Pos(int semid, Buffer_Operation_Enum operation)
+{
+    switch (operation)
+    {
+    case Read_From_Buffer:
+        return (9 - semctl(semid, (int)WritingPos, GETVAL));
+    case Write_Into_Buffer:
+        return (10 - semctl(semid, (int)WritingPos, GETVAL));
+    default:
+        return 0;
+    }
+}
+
+/**
+ * @brief Operate the read/write pointer.
+ * @author fwlh
+ * @param  semid            The necessary semaphore set id.
+ * @param  operation        The operation just done.
+ */
+static void Sem_Operate_Buffer(int semid, Buffer_Operation_Enum operation)
+{
+    switch (operation)
+    {
+    case Read_From_Buffer:
+        Semaphore_Release(semid, (int)WritingPos);
+        break;
+    case Write_Into_Buffer:
+        Semaphore_Take(semid, (int)WritingPos);
+        break;
+    default:
+        return;
+    }
+}
+
+/**
+ * @brief The entry of the consumer process.
+ * @author fwlh
+ */
+void Consumer_Entry(char *path)
+{
+    // Get the semaphore.
+    int semid = Get_SemID(path);
+    int Read_Pos = 0; // The pos to be read.
+
+    while (1)
+    {
+        // Check whether the buffer is empty.
+        if (Get_ReadWrite_Pos(semid, Read_From_Buffer) == -1)
+        {
+            // If the producer is not producing now, then could end itself.
+            if (semctl(semid, (int)Producing_End, GETVAL))
+                return;
+            sleep(1);
+            printf("process id = %d, Read pos = %d\n",
+                   getpid(), Get_ReadWrite_Pos(semid, Read_From_Buffer));
+            continue;
+        }
+        // Try to get the file locker.
+        Semaphore_Take(semid, (int)FileLock);
+        // Check again whether the buffer could be read.
+        if ((Read_Pos = Get_ReadWrite_Pos(semid, Read_From_Buffer)) != -1)
+        {
+            // Read a number.
+            Sem_Operate_Buffer(semid, Read_From_Buffer);
+            printf("process %d read: %d\n",
+                   getpid(), Read_Number_From_Buffer(Read_Pos));
+        }
+        // Release the file locker.
+        Semaphore_Release(semid, (int)FileLock);
+    }
+}
+
+/**
+ * @brief The entry of the producer process.
+ * @author fwlh
+ */
+void Producer_Entry(char *path, int maxProduce)
+{
+    // Get the semaphore.
+    int semid = Get_SemID(path);
+    int produce_cnt = 0; // The number produced now.
+    int write_pos = 0;   // The position in the buffer to write.
+
+    while (1)
+    {
+        // Judge whether the produce target is over.
+        if (produce_cnt == maxProduce)
+        {
+            Semaphore_Release(semid, (int)Producing_End);
+            break;
+        }
+        // Judge whether the buffer could hold to produce.
+        if (Get_ReadWrite_Pos(semid, Write_Into_Buffer) == BUFFER_MAX_NUMBERS)
+        {
+            sleep(1);
+            printf("process id = %d, Write pos = %d\n",
+                   getpid(), Get_ReadWrite_Pos(semid, Write_Into_Buffer));
+            continue;
+        }
+        // Try to get the file locker.
+        Semaphore_Take(semid, (int)FileLock);
+        // Recheck now could write to the buffer.
+        if ((write_pos = Get_ReadWrite_Pos(semid, Write_Into_Buffer)) !=
+            BUFFER_MAX_NUMBERS)
+        {
+            // Write the number.
+            Sem_Operate_Buffer(semid, Write_Into_Buffer);
+            // Write_Number_Into_Buffer(produce_cnt, write_pos);
+            ++produce_cnt;
+        }
+        // Release the file locker.
+        Semaphore_Release(semid, (int)FileLock);
+    }
+}
+
+/**
+ * @brief Fork 6 processes.
+ * @author fwlh
+ * @return int            return 1 if the father process, 2-7 the child processes, -1 if error.
+ */
+static int fork_6(void)
+{
+    for (int ret_number_child = 2; ret_number_child <= 7; ++ret_number_child)
+    {
+        int pid = fork();
         if (pid < 0)
         {
             fprintf(stderr, "Fork Failed");
-            exit(-1);
+            return -1;
         }
-        else if (pid)
-            // Father process.
-            Producer_Entry(sharedMemory); // Here comes the producer process.
-        else if (!pid)
-        {
-            // Child process.
-            Consumer_Entry(); // Here comes the fifth consumer process.
-            printf("0 End\n\n\n\n");
-            exit(0);
-        }
+        else if (pid == 0)
+            // The first child process.
+            return ret_number_child;
     }
+    return 1;
+}
 
-    /* Father process wait for all the child process to end. */
-    while (wait(NULL) > 0)
-        printf("waiting!\n");
-    /* Detach the shared memory. */
-    if (shmdt(shm) == -1)
+/**
+ * @brief Create the buffer.txt and write the ',' into the file to
+ * partition the numbers.
+ * @author fwlh
+ */
+void Write_File_Start(void)
+{
+    int fd = creat(BUFFER_FILE_NAME, O_CREAT | 0666);
+    ftruncate(fd, 0); // Clear the hole file.
+    // Open the file, but only need to write.
+    fd = open(BUFFER_FILE_NAME, O_WRONLY);
+    char blank[7] = "     ,";
+    for (int i = 0; i < BUFFER_MAX_NUMBERS; ++i)
     {
-        fprintf(stderr, "shmdt failed\n");
-        exit(EXIT_FAILURE);
+        // Write the file.
+        lseek(fd, 6 * i, SEEK_SET);
+        if (i != BUFFER_MAX_NUMBERS - 1)
+            write(fd, blank, strlen(blank));
+        else
+            write(fd, blank, strlen(blank) - 1);
     }
-    /* Delete the semaphore. */
-    sem_unlink("mutex");
-    sem_unlink("full");
+    // Don't forget to close.
+    close(fd);
+}
 
+int main(int argc, char *argv[])
+{
+    if (argc != 2)
+    {
+        printf("Please give the produce number!\n");
+        exit(-1);
+    }
+    int Produce_Number = String2IntNum_CVT(argv[1], strlen(argv[1]));
+
+    /* The first step: Init the necessary kernel object. */
+    // Create the buffer file and write the necessary content.
+    Write_File_Start();
+    // Create the semaphore.
+    int semid = Get_SemID(argv[0]);
+    // Set the initial value.
+    unsigned short value[SEM_SET_NUMBER] =
+        {[FileLock] = 1,
+         [Producing_End] = 0,
+         [WritingPos] = 10};
+    Set_All_Semaphore_Value(semid, value);
+
+    /* The second step: Create six processes. */
+    int ret = fork_6();
+    printf("ret = %d\n", ret);
+    if (ret < 0)
+        exit(-1);
+    else if (ret == 1)
+    {
+        // Wait for all the child processes to end.
+        for (int i = 0; i < 6; ++i)
+            wait(NULL);
+        goto EXIT;
+    }
+    // Call the producer and consumer processes respectively.
+    else if (ret == 2)
+    {
+        Producer_Entry(argv[0], Produce_Number);
+        exit(0);
+    }
+    else
+    {
+        // Consumer_Entry(argv[0]);
+        exit(0);
+    }
+
+EXIT:
+    // Ready to delete the semaphore.
+    semid = Get_SemID(argv[0]);
+    semctl(semid, 0, IPC_RMID);
     return 0;
 }

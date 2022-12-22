@@ -3,16 +3,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-int main(void) {
+int main(void)
+{
     int i;
-    for (i = 0; i < 2; i++) {
+    for (i = 0; i < 2; i++)
+    {
         fork();
-        // printf("-\n");
         printf("-");
-        fflush(stdout);
+        // fflush(stdout);
     }
     wait(NULL);
     wait(NULL);
-    // printf("\n");
     return 0;
 }

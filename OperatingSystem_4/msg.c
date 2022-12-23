@@ -13,9 +13,6 @@
 #include <sys/msg.h>
 #include <sys/wait.h>
 
-// Specify that the communication between two processes uses the key value 23
-#define MSGKEY 23
-
 typedef enum
 {
     From_P1_To_P2 = 1,
@@ -28,12 +25,12 @@ struct msg
     char msg_buf[511];
 };
 
-int main(void)
+int main(int argc, char* argv[])
 {
     /* Init the startup of the Experiment. */
     int qid, pid, len, retvalue;
     struct msg pmsg;
-    if ((qid = msgget(MSGKEY, IPC_CREAT | 0666)) < 0) // Create the message object.
+    if ((qid = msgget(ftok(argv[0], 'a'), IPC_CREAT | 0666)) < 0) // Create the message object.
     {
         perror("msgget");
         exit(1);
@@ -56,6 +53,7 @@ int main(void)
         }
         else if(pid != 0)
         { // Wait for all the child processes to end and be ready to return.
+            wait(NULL);
             wait(NULL);
             goto EXIT;
         }
@@ -112,7 +110,7 @@ P2: // The work of the process 2.
     }
     printf("successfully send a message to the p1, destination qid:%d\n", qid);
     return 0;
-    
+
     /* Delete the message created before. */
 EXIT:
     msgctl(qid, IPC_RMID, NULL);

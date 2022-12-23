@@ -32,14 +32,14 @@ void *runner02(void *param)
 int main(int argc, char *argv[])
 {
     /* Print the args received. */
-    fprintf(stderr, "argc = %d\n", argc);
+    // printf("argc = %d\n", argc);
     if (argc != 2)
     {
         fprintf(stderr, "argc = %d\n", argc);
         fprintf(stderr, "usage:a.out<integer value>\n");
         return -1;
     }
-    fprintf(stderr, "argv[0] = %s\n", argv[0]);
+    // printf("argv[0] = %s\n", argv[0]);
     if (atoi(argv[1]) <= 0)
     {
         fprintf(stderr, "%d must be > 0\n", atoi(argv[1]));
@@ -56,9 +56,9 @@ int main(int argc, char *argv[])
     pthread_t tid02;
     pthread_create(&tid02, &attr, runner02, argv[1]);
 
-    /* Print that the main thread end. */
-    fprintf(stderr, "Here comes the end of main thread.\n");
-    usleep(10);
+    // /* Print that the main thread end. */
+    // fprintf(stdout, "Here comes the end of main thread.\n");
+    // usleep(10);
     /* Just kill the current thread but not the whole process. */
     pthread_exit(0);
 }

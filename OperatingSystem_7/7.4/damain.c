@@ -16,7 +16,8 @@ int main(void)
 
     // Calculate and get the real library position.
     char *fileRelativePos = "/libtest.so";
-    char *fileAbsolutePos = (char *)malloc(strlen(fileRelativePos) + strlen(getcwd(NULL, 0)));
+    char *fileAbsolutePos = (char *)malloc(strlen(fileRelativePos) +
+                                           strlen(getcwd(NULL, 0)));
     strcpy(fileAbsolutePos, getcwd(NULL, 0));
     strcat(fileAbsolutePos, fileRelativePos);
     // printf("The library direction: %s\n", fileAbsolutePos);
@@ -30,11 +31,13 @@ int main(void)
 
     // Now load the Dynamic Libaray successfully, so should wait for the User to comfirm.
     fun = dlsym(plib, "printHello");
-    fun();
+    if (fun)
+        fun();
 
     // Now already release the Dynamic Libaray, so should wait for the User to comfirm.
     while (dlclose(plib))
         continue;
+    fun = NULL;
     printf("After release dynamic libaray\nPlease enter to continue:");
     getchar();
 

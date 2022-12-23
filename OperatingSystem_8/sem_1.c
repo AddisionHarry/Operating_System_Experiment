@@ -16,6 +16,7 @@ typedef enum
     Sem_All // The number of the semaphore used.
 } Sem_Purpose_Enum;
 
+#define USE_SEMAPHORE 1               // Whether to use the semaphore
 #define BUFFER_FILE_NAME "buffer.txt" // The name of the buffer file.
 #define BUFFER_MAX_NUMBERS 10         // The most numbers buffer could hold.
 #define BUFFER_MAX_NUMBER 99999       // The max number buffer could hold.
@@ -30,6 +31,7 @@ typedef enum
  */
 int Get_SemID(char *argv)
 {
+#if USE_SEMAPHORE
     // Get the semaphore key.
     int key = ftok(argv, FTOK_PROJ_ID);
     if (key == -1)
@@ -45,6 +47,9 @@ int Get_SemID(char *argv)
         exit(1);
     }
     return semid;
+#else
+    return 0;
+#endif
 }
 
 /**
@@ -56,11 +61,13 @@ int Get_SemID(char *argv)
  */
 void Set_Single_Semaphore_Value(int semid, int index, int value)
 {
+#if USE_SEMAPHORE
     // Invalid input index.
     if ((index < 0) || (index >= SEM_SET_NUMBER))
         return;
     if (semctl(semid, index, SETVAL, &value) == -1)
         fprintf(stderr, "Error in semget:%s\n", strerror(errno));
+#endif
 }
 
 /**
@@ -73,6 +80,7 @@ void Set_Single_Semaphore_Value(int semid, int index, int value)
  */
 void Set_All_Semaphore_Value(int semid, unsigned short *value)
 {
+#if USE_SEMAPHORE
     if (!value)
         printf("Set a null pointer!\n");
     union semun
@@ -94,6 +102,7 @@ void Set_All_Semaphore_Value(int semid, unsigned short *value)
         if (semctl(semid, 0, SETALL, arg) == -1)
             fprintf(stderr, "Error in semget:%s\n", strerror(errno));
     }
+#endif
 }
 
 /**
@@ -105,11 +114,15 @@ void Set_All_Semaphore_Value(int semid, unsigned short *value)
  */
 int Semaphore_Release(int semid, int index)
 {
+#if USE_SEMAPHORE
     struct sembuf sops[SEM_SET_NUMBER];
     sops[index].sem_num = index;
     sops[index].sem_op = +1;
     sops[index].sem_flg = SEM_UNDO;
     return semop(semid, sops, SEM_SET_NUMBER);
+#else
+    return 0;
+#endif
 }
 
 /**
@@ -121,11 +134,15 @@ int Semaphore_Release(int semid, int index)
  */
 int Semaphore_Take(int semid, int index)
 {
+#if USE_SEMAPHORE
     struct sembuf sops[SEM_SET_NUMBER];
     sops[index].sem_num = index;
     sops[index].sem_op = -1;
     sops[index].sem_flg = SEM_UNDO;
     return semop(semid, sops, SEM_SET_NUMBER);
+#else
+    return 0;
+#endif
 }
 
 /**
@@ -266,9 +283,6 @@ void Consumer_Entry(char *path)
             // If the producer is not producing now, then could end itself.
             if (semctl(semid, (int)Producing_End, GETVAL))
                 return;
-            sleep(1);
-            printf("process id = %d, Read pos = %d\n",
-                   getpid(), Get_ReadWrite_Pos(semid, Read_From_Buffer));
             continue;
         }
         // Try to get the file locker.
@@ -278,8 +292,7 @@ void Consumer_Entry(char *path)
         {
             // Read a number.
             Sem_Operate_Buffer(semid, Read_From_Buffer);
-            printf("process %d read: %d\n",
-                   getpid(), Read_Number_From_Buffer(Read_Pos));
+            Read_Number_From_Buffer(Read_Pos);
         }
         // Release the file locker.
         Semaphore_Release(semid, (int)FileLock);
@@ -307,12 +320,7 @@ void Producer_Entry(char *path, int maxProduce)
         }
         // Judge whether the buffer could hold to produce.
         if (Get_ReadWrite_Pos(semid, Write_Into_Buffer) == BUFFER_MAX_NUMBERS)
-        {
-            sleep(1);
-            printf("process id = %d, Write pos = %d\n",
-                   getpid(), Get_ReadWrite_Pos(semid, Write_Into_Buffer));
             continue;
-        }
         // Try to get the file locker.
         Semaphore_Take(semid, (int)FileLock);
         // Recheck now could write to the buffer.
@@ -332,7 +340,8 @@ void Producer_Entry(char *path, int maxProduce)
 /**
  * @brief Fork 6 processes.
  * @author fwlh
- * @return int            return 1 if the father process, 2-7 the child processes, -1 if error.
+ * @return int            return 1 if the father process, 2-7 the child processes,
+ *                              -1 if error.
  */
 static int fork_6(void)
 {
@@ -399,7 +408,7 @@ int main(int argc, char *argv[])
 
     /* The second step: Create six processes. */
     int ret = fork_6();
-    printf("ret = %d\n", ret);
+    // printf("ret = %d\n", ret);
     if (ret < 0)
         exit(-1);
     else if (ret == 1)
@@ -425,5 +434,6 @@ EXIT:
     // Ready to delete the semaphore.
     semid = Get_SemID(argv[0]);
     semctl(semid, 0, IPC_RMID);
+
     return 0;
 }
